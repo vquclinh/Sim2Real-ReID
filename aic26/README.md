@@ -103,3 +103,4 @@ These patterns are already covered by `.gitignore` at the repo root.
 | `docs/audits/AIC26_FIX_REPORT.md` | Report of fixes applied after copy verification |
 | `docs/audits/AIC26_VI_TO_EN_TRANSLATION_REPORT.md` | Vietnamese→English translation report (all 16 files) |
 | `docs/audits/AIC26_NOTEBOOK_FORMAT_FIX_REPORT.md` | Notebook character-split format fix + final translation pass |
+| `docs/audits/AIC26_TRAINING_CODE_AUDIT.md` | Read-only audit of HUI training/inference code — readiness assessment + recommended paths |
