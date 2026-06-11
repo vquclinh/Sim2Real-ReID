@@ -122,6 +122,17 @@ if str(PM_REPO) not in sys.path:
 
 print("perception_models repo:", PM_REPO)
 print("PASS: PE-G14 dependencies ready.")
+
+# Clone repo to access aic26.eval utilities
+REPO_DIR = Path("/content/Sim2Real-ReID")
+if not REPO_DIR.exists():
+    !git clone -b clean-adaption https://github.com/vquclinh/Sim2Real-ReID.git "{REPO_DIR}"
+
+if str(REPO_DIR) not in sys.path:
+    sys.path.insert(0, str(REPO_DIR))
+
+print("Repo path:", REPO_DIR)
+
 ```
 
 ## Cell 4
@@ -378,9 +389,18 @@ print("query_emb_np:", query_emb_np.shape, query_emb_np.dtype)
 # Cell 7 — Evaluate and save local metrics
 
 from pathlib import Path
-import json, datetime, subprocess
+import json, datetime
 import numpy as np
 import torch
+
+from aic26.eval.pab_metrics import (
+    compute_single_positive_metrics,
+    find_positive_ranks,
+    build_topk_records,
+    write_json,
+    write_jsonl,
+    write_metrics_markdown,
+)
 
 RUN_ID    = "local_001_pe_g14_attr_zero_shot"
 LOCAL_RUN = Path("/content/aic_local/pab_original/runs") / RUN_ID
@@ -389,126 +409,85 @@ DRIVE_RUN = Path("/content/drive/MyDrive/aic2026_data/pab_original/runs") / RUN_
 LOCAL_RUN.mkdir(parents=True, exist_ok=True)
 DRIVE_RUN.mkdir(parents=True, exist_ok=True)
 
-# gallery_ids, query_ids, query_captions, positive_images from Cell 4
-# gallery_emb_np, query_emb_np from Cell 6
-# device, AUTOCAST_DTYPE, total_gb from Cell 5
-
-gallery_id_to_idx = {rel: i for i, rel in enumerate(gallery_ids)}
-
+# Compute full similarity matrix and ranked indices
+# gallery_emb_np, query_emb_np from Cell 6; device from Cell 5
 G_t = torch.from_numpy(gallery_emb_np).to(device, dtype=torch.float32)
 Q_t = torch.from_numpy(query_emb_np).to(device, dtype=torch.float32)
 
-TOPK    = 10
-Q_CHUNK = 256
+print("Computing similarity matrix...")
+with torch.inference_mode():
+    sims_np = (Q_t @ G_t.T).cpu().numpy()  # (n_queries, n_gallery)
 
-rankings_top10 = []
-aps, r_at_1, r_at_5, r_at_10, ranks = [], [], [], [], []
+ranked_indices = np.argsort(-sims_np, axis=1)  # full ranking per query
 
-for start in range(0, Q_t.size(0), Q_CHUNK):
-    end  = min(start + Q_CHUNK, Q_t.size(0))
-    sims = Q_t[start:end] @ G_t.T
-    sorted_idx = torch.argsort(sims, dim=1, descending=True).cpu().numpy()
+# gallery_ids, query_ids, query_captions, positive_images from Cell 4
+positive_ranks = find_positive_ranks(gallery_ids, ranked_indices, positive_images)
 
-    for local_i, global_i in enumerate(range(start, end)):
-        qid     = query_ids[global_i]
-        cap     = query_captions[global_i]
-        pos_img = positive_images[global_i]
-        pos_idx = gallery_id_to_idx.get(pos_img)
+metrics = compute_single_positive_metrics(positive_ranks)
+metrics.update({
+    "run_id":    RUN_ID,
+    "model":     "PE-Core-G14-448",
+    "dataset":   "PAB original attr test",
+    "n_queries": len(query_ids),
+    "n_gallery": len(gallery_ids),
+})
 
-        if pos_idx is None:
-            rank = len(gallery_ids) + 1
-        else:
-            rank_arr = np.where(sorted_idx[local_i] == pos_idx)[0]
-            rank = int(rank_arr[0]) + 1 if len(rank_arr) > 0 else len(gallery_ids) + 1
-
-        aps.append(1.0 / rank)
-        r_at_1.append(1 if rank <= 1 else 0)
-        r_at_5.append(1 if rank <= 5 else 0)
-        r_at_10.append(1 if rank <= 10 else 0)
-        ranks.append(rank)
-
-        top10_ids = [gallery_ids[j] for j in sorted_idx[local_i][:TOPK]]
-        rankings_top10.append({
-            "query_id":       qid,
-            "caption":        cap,
-            "positive_image": pos_img,
-            "positive_rank":  rank,
-            "top10":          top10_ids,
-        })
-
-mAP         = float(np.mean(aps))
-R1          = float(np.mean(r_at_1))
-R5          = float(np.mean(r_at_5))
-R10         = float(np.mean(r_at_10))
-median_rank = float(np.median(ranks))
-mean_rank   = float(np.mean(ranks))
-
-metrics = {
-    "run_id":       RUN_ID,
-    "model":        "PE-Core-G14-448",
-    "dataset":      "PAB original attr test",
-    "n_queries":    len(query_ids),
-    "n_gallery":    len(gallery_ids),
-    "mAP":          round(mAP, 6),
-    "R@1":          round(R1, 6),
-    "R@5":          round(R5, 6),
-    "R@10":         round(R10, 6),
-    "median_rank":  median_rank,
-    "mean_rank":    round(mean_rank, 2),
-}
+top10_records = build_topk_records(
+    query_ids, query_captions, positive_images,
+    gallery_ids, ranked_indices, positive_ranks, topk=10,
+)
+positive_rank_records = [
+    {"query_id": qid, "positive_image": pos, "positive_rank": rank}
+    for qid, pos, rank in zip(query_ids, positive_images, positive_ranks)
+]
 
 now = datetime.datetime.now().isoformat(timespec='seconds')
+extra = {"Model": "PE-Core-G14-448", "Dataset": "PAB original attr test", "Date": now}
 
-metrics_md = (
-    "# Local Eval: " + RUN_ID + "\n\n"
-    "**Date:** " + now + "\n\n"
-    "| Metric | Value |\n"
-    "|---|---|\n"
-    "| Model | PE-Core-G14-448 |\n"
-    "| Dataset | PAB original attr test |\n"
-    "| Queries | " + str(metrics["n_queries"]) + " |\n"
-    "| Gallery | " + str(metrics["n_gallery"]) + " |\n"
-    "| mAP | " + f"{mAP:.4f}" + " |\n"
-    "| R@1 | " + f"{R1:.4f}" + " |\n"
-    "| R@5 | " + f"{R5:.4f}" + " |\n"
-    "| R@10 | " + f"{R10:.4f}" + " |\n"
-    "| Median rank | " + f"{median_rank:.0f}" + " |\n"
-    "| Mean rank | " + f"{mean_rank:.1f}" + " |\n"
-)
-
-run_info_md = (
-    "# " + RUN_ID + "\n\n"
-    "**Date:** " + now + "\n\n"
-    "## Purpose\n\n"
-    "Local evaluation of PE-Core-G14-448 zero-shot on the original PAB attr test split.\n\n"
-    "## Method\n\n"
-    "Model: PE-Core-G14-448  \nTraining: none  \nFine-tuning: none  \nEnsemble: none  \n\n"
-    "## Results\n\n"
-    "mAP: " + f"{mAP:.4f}" + "  \n"
-    "R@1: " + f"{R1:.4f}"  + "  \n"
-    "R@5: " + f"{R5:.4f}"  + "  \n"
-    "R@10: " + f"{R10:.4f}" + "  \n"
-    "Median rank: " + f"{median_rank:.0f}" + "  \n"
-    "Mean rank: " + f"{mean_rank:.1f}" + "  \n"
-)
+run_info_lines = [
+    "# " + RUN_ID,
+    "",
+    "**Date:** " + now,
+    "",
+    "## Purpose",
+    "",
+    "Local evaluation of PE-Core-G14-448 zero-shot on the original PAB attr test split.",
+    "",
+    "## Method",
+    "",
+    "Model: PE-Core-G14-448  ",
+    "Training: none  ",
+    "Fine-tuning: none  ",
+    "Ensemble: none  ",
+    "",
+    "## Results",
+    "",
+    "mAP: " + f"{metrics['mAP']:.4f}",
+    "R@1: " + f"{metrics['R@1']:.4f}",
+    "R@5: " + f"{metrics['R@5']:.4f}",
+    "R@10: " + f"{metrics['R@10']:.4f}",
+    "Median rank: " + f"{metrics['median_rank']:.0f}",
+    "Mean rank: " + f"{metrics['mean_rank']:.1f}",
+]
+NL = chr(10)
+run_info_md = NL.join(run_info_lines) + NL
 
 for run_dir in [LOCAL_RUN, DRIVE_RUN]:
-    (run_dir / "metrics.json").write_text(
-        json.dumps(metrics, indent=2, ensure_ascii=False), encoding="utf-8"
-    )
-    (run_dir / "metrics.md").write_text(metrics_md, encoding="utf-8")
-    with open(run_dir / "rankings_top10.jsonl", "w", encoding="utf-8") as f:
-        for row in rankings_top10:
-            f.write(json.dumps(row, ensure_ascii=False) + "\n")
+    write_json(run_dir / "metrics.json", metrics)
+    write_metrics_markdown(run_dir / "metrics.md", RUN_ID, metrics, extra=extra)
+    write_jsonl(run_dir / "rankings_top10.jsonl", top10_records)
+    write_jsonl(run_dir / "positive_ranks.jsonl", positive_rank_records)
     (run_dir / "run_info.md").write_text(run_info_md, encoding="utf-8")
 
 print("=== LOCAL EVAL RESULTS ===")
-print(f"mAP:         {mAP:.4f}")
-print(f"R@1:         {R1:.4f}")
-print(f"R@5:         {R5:.4f}")
-print(f"R@10:        {R10:.4f}")
-print(f"Median rank: {median_rank:.0f}")
-print(f"Mean rank:   {mean_rank:.1f}")
+print(f"Queries:     {metrics['queries']}")
+print(f"Found any:   {metrics['found_any']}")
+print(f"mAP:         {metrics['mAP']:.4f}")
+print(f"R@1:         {metrics['R@1']:.4f}")
+print(f"R@5:         {metrics['R@5']:.4f}")
+print(f"R@10:        {metrics['R@10']:.4f}")
+print(f"Median rank: {metrics['median_rank']:.0f}")
+print(f"Mean rank:   {metrics['mean_rank']:.1f}")
 print()
 print("Saved to:", LOCAL_RUN)
 print("Saved to:", DRIVE_RUN)
