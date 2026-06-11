@@ -1,12 +1,12 @@
 """Shared utilities for AIC2026 Track 4 feature extraction on Colab A100.
 
-Hai notebook `01a_pe_g14_features.ipynb` và `01b_vitpose_features.ipynb`
-share module này để:
-  1. Bootstrap môi trường: mount Drive, cache Kaggle dataset, rsync sang
-     local SSD của Colab.
+Both notebooks `01a_pe_g14_features.ipynb` and `01b_vitpose_features.ipynb`
+share this module to:
+  1. Bootstrap the environment: mount Drive, cache Kaggle dataset, rsync to
+     the Colab local SSD.
   2. Pick A100 device, set TF32 / cuDNN benchmark / Flash SDPA.
-  3. Save NPZ atomically + async sync sang Drive theo chunk.
-  4. Liệt kê chunks đã có (Drive + local) cho resume logic.
+  3. Save NPZ atomically + async sync to Drive in chunks.
+  4. List existing chunks (Drive + local) for resume logic.
 """
 
 from __future__ import annotations
@@ -46,12 +46,12 @@ def _materialize_kaggle_token(
     target: Path,
     fallback_username: str = "anonymous",
 ) -> bool:
-    """Ghi kaggle.json từ `text` (JSON hoặc raw access token).
+    """Write kaggle.json from `text` (JSON or raw access token).
 
-    Trả về True nếu thành công. Hỗ trợ:
-      - JSON form `{"username":..., "key":...}` (kaggle.json chuẩn).
-      - Raw access token `KGAT_xxx` hoặc plain string (1 dòng) — sẽ
-        wrap thành `{"username": KAGGLE_USERNAME or "anonymous", "key": <token>}`.
+    Returns True on success. Supports:
+      - JSON form `{"username":..., "key":...}` (standard kaggle.json).
+      - Raw access token `KGAT_xxx` or plain string (1 line) — will be
+        wrapped into `{"username": KAGGLE_USERNAME or "anonymous", "key": <token>}`.
     """
     text = text.strip()
     if not text:
@@ -69,7 +69,7 @@ def _materialize_kaggle_token(
             return False
         return False
 
-    # Raw token (KGAT_... hoặc plain alphanum). Wrap vào JSON.
+    # Raw token (KGAT_... or plain alphanum). Wrap into JSON.
     username = os.environ.get("KAGGLE_USERNAME") or fallback_username
     target.write_text(json.dumps({"username": username, "key": text}))
     os.environ["KAGGLE_USERNAME"] = username
@@ -81,14 +81,14 @@ def _ensure_kaggle_credentials(
     drive_root: Path,
     kaggle_token_path: str | None,
 ) -> None:
-    """Đặt KAGGLE_CONFIG_DIR và đảm bảo kaggle.json tồn tại.
+    """Set KAGGLE_CONFIG_DIR and ensure kaggle.json exists.
 
-    Thứ tự tìm token (mỗi candidate có thể là JSON hoặc raw `KGAT_*`):
-      1. Arg `kaggle_token_path` (hỗ trợ ~ expand).
+    Token lookup order (each candidate may be JSON or raw `KGAT_*`):
+      1. Arg `kaggle_token_path` (supports ~ expand).
       2. `drive_root/.kaggle/kaggle.json`.
       3. `~/.kaggle/kaggle.json`.
-      4. `~/.kaggle/access_token` (Kaggle access token format mới).
-      5. Env var KAGGLE_USERNAME + KAGGLE_KEY (đã set bên ngoài).
+      4. `~/.kaggle/access_token` (new Kaggle access token format).
+      5. Env var KAGGLE_USERNAME + KAGGLE_KEY (already set externally).
     """
     cfg_dir = Path.home() / ".kaggle"
     cfg_dir.mkdir(parents=True, exist_ok=True)
@@ -124,12 +124,12 @@ def _ensure_kaggle_credentials(
         return
 
     raise FileNotFoundError(
-        "Không tìm thấy kaggle credentials. Có 2 cách:\n"
-        f"  1) Upload kaggle.json vào {drive_root}/.kaggle/kaggle.json\n"
-        "  2) Tạo access token raw: \n"
+        "Kaggle credentials not found. Two options:\n"
+        f"  1) Upload kaggle.json to {drive_root}/.kaggle/kaggle.json\n"
+        "  2) Create a raw access token: \n"
         "     !mkdir -p ~/.kaggle && echo <KGAT_...> > ~/.kaggle/access_token\n"
         "     && chmod 600 ~/.kaggle/access_token\n"
-        "Hoặc truyền kaggle_token_path='~/.kaggle/access_token'."
+        "Or pass kaggle_token_path='~/.kaggle/access_token'."
     )
 
 
@@ -150,10 +150,10 @@ def _ensure_kagglehub() -> None:
 
 
 def _rsync(src: Path, dst: Path) -> None:
-    """rsync src/ → dst/ — chỉ copy file thiếu/đã thay đổi.
+    """rsync src/ -> dst/ — copy only missing/changed files.
 
-    Nếu hệ thống không có `rsync` (hiếm trên Colab) fallback sang
-    `shutil.copytree(..., dirs_exist_ok=True)`.
+    Falls back to `shutil.copytree(..., dirs_exist_ok=True)` if the system
+    does not have `rsync` (rare on Colab).
     """
     src.mkdir(parents=True, exist_ok=True)
     dst.mkdir(parents=True, exist_ok=True)
@@ -171,11 +171,11 @@ def _marker_for(slug: str, dest: Path) -> Path:
 
 
 def _download_kaggle_dataset(slug: str, dest: Path, force: bool = False) -> Path:
-    """Download 1 Kaggle dataset → `dest` và merge structure.
+    """Download 1 Kaggle dataset -> `dest` and merge structure.
 
-    Nhiều dataset có thể merge vào cùng `dest` (ví dụ annotation +
-    train-webp-part-01-05 + train-webp-part-06-10 share thư mục `raw/`).
-    Mỗi slug có file marker `.synced_<slug>` riêng để skip khi đã sync.
+    Multiple datasets can be merged into the same `dest` (e.g. annotation +
+    train-webp-part-01-05 + train-webp-part-06-10 share the `raw/` directory).
+    Each slug has its own `.synced_<slug>` marker file to skip when already synced.
     """
     _ensure_kagglehub()
     import kagglehub
@@ -183,7 +183,7 @@ def _download_kaggle_dataset(slug: str, dest: Path, force: bool = False) -> Path
     dest.mkdir(parents=True, exist_ok=True)
     marker = _marker_for(slug, dest)
     if marker.exists() and not force:
-        print(f"[setup] {slug} đã sync trước đó — skip")
+        print(f"[setup] {slug} already synced previously — skip")
         return dest
 
     print(f"[setup] Downloading {slug} …")
@@ -200,21 +200,21 @@ def _robust_drive_mkdir(
     retries: int = 3,
     sleep_base: float = 1.0,
 ) -> bool:
-    """mkdir trên Drive FUSE với multiple strategies + retry.
+    """mkdir on Drive FUSE with multiple strategies + retry.
 
-    Drive FUSE Errno 5 thường do orphan folder trong trash hoặc FUSE state
-    corruption — retry thuần KHÔNG giải quyết. Helper này thử 3 strategies
-    theo thứ tự (mỗi attempt qua loop):
+    Drive FUSE Errno 5 is usually caused by orphan folders in trash or FUSE state
+    corruption — pure retry does NOT fix it. This helper tries 3 strategies
+    in order (each attempt in the loop):
       1. Python `pathlib.mkdir(parents=True, exist_ok=True)`
-      2. Shell `mkdir -p` (qua subprocess — đôi khi bypass FUSE quirks)
-      3. Check `path.exists()` sau khi mkdir error (FUSE đôi khi thành công
-         nhưng vẫn raise — folder vẫn tạo được)
+      2. Shell `mkdir -p` (via subprocess — sometimes bypasses FUSE quirks)
+      3. Check `path.exists()` after mkdir error (FUSE sometimes succeeds
+         but still raises — the folder was actually created)
 
     Returns:
-        True nếu cuối cùng path tồn tại.
-        False nếu fail sau hết retries — caller nên skip Drive op.
+        True if path ultimately exists.
+        False if all retries fail — caller should skip the Drive op.
     """
-    # Fast path: đã tồn tại
+    # Fast path: already exists
     try:
         if path.exists():
             return True
@@ -242,7 +242,7 @@ def _robust_drive_mkdir(
         except (subprocess.CalledProcessError, OSError) as e:
             last_err = e
 
-        # Strategy 3: re-check existence sau cả 2 strategies
+        # Strategy 3: re-check existence after both strategies
         try:
             if path.exists():
                 return True
@@ -250,7 +250,7 @@ def _robust_drive_mkdir(
             pass
 
         if attempt == retries - 1:
-            print(f"[drive] mkdir {path} fail sau {retries} retries (strategies 1+2+3): {last_err}")
+            print(f"[drive] mkdir {path} failed after {retries} retries (strategies 1+2+3): {last_err}")
             return False
 
         wait = sleep_base * (2 ** attempt)
@@ -266,13 +266,13 @@ def _ensure_rclone(
 ) -> Path:
     """Install rclone (if missing) and write config to `~/.config/rclone/rclone.conf`.
 
-    `config_source` có thể là:
-      - Path đến file rclone.conf / rclone.txt (local hoặc Drive)
-      - Raw INI text (chứa `[remote_name]`)
-      - None → auto-search `<drive_root>/rclone.txt|conf`, `/content/rclone.txt|conf`
-              hoặc `~/Documents/AIC2026/rclone.txt` (dev fallback)
+    `config_source` can be:
+      - Path to an rclone.conf / rclone.txt file (local or Drive)
+      - Raw INI text (containing `[remote_name]`)
+      - None -> auto-search `<drive_root>/rclone.txt|conf`, `/content/rclone.txt|conf`
+              or `~/Documents/AIC2026/rclone.txt` (dev fallback)
 
-    Returns path đến rclone.conf đã ghi.
+    Returns path to the written rclone.conf.
     """
     # 1) Install rclone if needed
     if not shutil.which("rclone"):
@@ -302,8 +302,8 @@ def _ensure_rclone(
                 break
         if config_source is None:
             raise FileNotFoundError(
-                "Không tìm thấy rclone config. Upload rclone.txt lên Drive "
-                f"({drive_root}/rclone.txt) hoặc truyền config_source='...'."
+                "rclone config not found. Upload rclone.txt to Drive "
+                f"({drive_root}/rclone.txt) or pass config_source='...'."
             )
 
     if isinstance(config_source, (str, os.PathLike)) and Path(config_source).exists():
@@ -375,18 +375,18 @@ def stage_test_set_local(
     rclone_checkers: int = 16,
     drive_mount: str | os.PathLike = "/content/drive/MyDrive",
 ) -> dict:
-    """Copy `<input_root>/name-masked_test-set/` từ Drive sang local SSD.
+    """Copy `<input_root>/name-masked_test-set/` from Drive to local SSD.
 
-    Drive FUSE raise `OSError: [Errno 5]` khi iter folder nhiều file. Helper
-    này tránh issue bằng cách:
+    Drive FUSE raises `OSError: [Errno 5]` when iterating folders with many files.
+    This helper avoids the issue by:
 
-    1) Đếm file qua shell `ls | wc -l` (chịu lỗi tốt hơn Python iterdir).
-    2) Stream copy bằng `tar | tar` qua pipe (1 metadata read + sequential
-       file reads) — nhanh hơn rsync (rsync stat từng file = 36k × 50ms qua
-       FUSE = 30+ phút chỉ để liệt kê chưa transfer).
-    3) Sao chép file query JSON nhỏ riêng qua `shutil.copy2`.
+    1) Counting files via shell `ls | wc -l` (more fault-tolerant than Python iterdir).
+    2) Stream copying with `tar | tar` over a pipe (1 metadata read + sequential
+       file reads) — faster than rsync (rsync stats each file = 36k × 50ms over
+       FUSE = 30+ minutes just to enumerate before transfer).
+    3) Copying small query JSON files separately via `shutil.copy2`.
 
-    Idempotent — chạy lại không re-copy nếu local count đã match.
+    Idempotent — re-running does not re-copy if local count already matches.
     """
     input_root = Path(paths["input_root"])
     local_root = Path(paths["local_root"])
@@ -411,7 +411,7 @@ def stage_test_set_local(
         have_count = 0
 
     if target_count > 0 and have_count >= target_count:
-        print(f"[stage-test] gallery local đã đầy ({have_count}/{target_count}) — skip copy")
+        print(f"[stage-test] gallery local already full ({have_count}/{target_count}) — skip copy")
     else:
         print(f"[stage-test] copy {drive_gallery} → {local_gallery} "
               f"(have={have_count}, target={target_count if target_count > 0 else '?'})")
@@ -526,27 +526,27 @@ def setup_aic2026_environment(
     kaggle_token_path: str | None = None,
     copy_raw_to_local: bool = False,
 ) -> dict[str, Path]:
-    """Bootstrap đầy đủ cho 1 session Colab.
+    """Full bootstrap for a single Colab session.
 
-    Returns paths dict gồm:
+    Returns paths dict containing:
       drive_root, local_root, input_root, manifest_dir, output_root,
       drive_output_root, annotation_train_dir, test_dir, gallery_dir.
 
-    `output_root` luôn trỏ local SSD (write nhanh).
-    `drive_output_root` là nơi sync chunks về để persistent.
+    `output_root` always points to local SSD (fast writes).
+    `drive_output_root` is where chunks are synced to for persistence.
 
-    **Default flow (no Kaggle)**: dataset đã có sẵn ở `<drive_root>/raw/` +
-    `<drive_root>/manifest/` (hoặc `manifests/`). Hàm này chỉ symlink các
-    folder đó vào `<local_root>/raw/` và `<local_root>/manifests/` để code
-    còn lại (đọc qua `paths['input_root']`, `paths['manifest_dir']`) không
-    cần thay đổi.
+    **Default flow (no Kaggle)**: dataset is already present at `<drive_root>/raw/` +
+    `<drive_root>/manifest/` (or `manifests/`). This function only symlinks those
+    folders into `<local_root>/raw/` and `<local_root>/manifests/` so the rest of
+    the code (reading via `paths['input_root']`, `paths['manifest_dir']`) does not
+    need to change.
 
-    **Kaggle fallback**: set `use_kaggle=True` để bật lại pipeline cũ
-    (download qua kagglehub). Yêu cầu có kaggle.json hoặc access_token.
+    **Kaggle fallback**: set `use_kaggle=True` to re-enable the old pipeline
+    (download via kagglehub). Requires kaggle.json or access_token.
 
-    **Local SSD speed**: với training notebook (đọc 1M+ ảnh nhiều lần),
-    set `copy_raw_to_local=True` để rsync raw từ Drive về local SSD —
-    chậm 30-60 min lần đầu nhưng training nhanh hơn ~5-10×.
+    **Local SSD speed**: for training notebooks (reading 1M+ images many times),
+    set `copy_raw_to_local=True` to rsync raw from Drive to local SSD —
+    slow (30-60 min) on first run but training is ~5-10× faster.
     """
     drive_root = Path(drive_root)
     local_root = Path(local_root)
@@ -559,20 +559,20 @@ def setup_aic2026_environment(
             if not Path("/content/drive/MyDrive").exists():
                 drive.mount("/content/drive")
             else:
-                print("[setup] Drive đã mount sẵn.")
+                print("[setup] Drive already mounted.")
         except ImportError:
-            warnings.warn("google.colab.drive không khả dụng — bỏ qua mount.")
+            warnings.warn("google.colab.drive not available — skipping mount.")
 
     drive_root.mkdir(parents=True, exist_ok=True)
     local_root.mkdir(parents=True, exist_ok=True)
 
-    # Step 2: Kaggle credentials (chỉ khi use_kaggle=True) ------------------
+    # Step 2: Kaggle credentials (only when use_kaggle=True) ------------------
     if use_kaggle:
         _ensure_kaggle_credentials(drive_root, kaggle_token_path)
 
-    # Step 3: Restore raw + manifests từ Drive → local SSD ------------------
+    # Step 3: Restore raw + manifests from Drive -> local SSD ------------------
     drive_raw = drive_root / "raw"
-    # Drive folder có thể tên 'manifest' (singular, theo screenshot user) hoặc
+    # Drive folder may be named 'manifest' (singular, per user screenshot) or
     # 'manifests' (legacy). Pick whichever exists.
     drive_manifests = next(
         (p for p in (drive_root / "manifest", drive_root / "manifests") if p.exists()),
@@ -592,17 +592,17 @@ def setup_aic2026_environment(
 
     # Step 3a: Restore raw
     if local_raw.exists() and (local_raw.is_symlink() or any(local_raw.iterdir())):
-        print(f"[setup] raw đã ready: {local_raw}")
+        print(f"[setup] raw already ready: {local_raw}")
     elif (drive_root / "raw_tar_parts" / ".tar_complete").exists():
-        # FAST PATH (legacy session với tar-split mirror)
+        # FAST PATH (legacy session with tar-split mirror)
         restore_raw_from_tar_split(raw_paths, force=force_redownload)
     elif drive_raw.exists() and any(drive_raw.iterdir()):
         if copy_raw_to_local:
-            print(f"[setup] rsync raw từ Drive → {local_raw} (có thể mất 30-60 min)")
+            print(f"[setup] rsync raw from Drive → {local_raw} (may take 30-60 min)")
             _rsync(drive_raw, local_raw)
         else:
-            # Symlink Drive → local. Instant, đọc trực tiếp qua Drive FUSE.
-            # OK cho inference / zero-shot; training nên dùng copy_raw_to_local=True.
+            # Symlink Drive -> local. Instant, reads directly via Drive FUSE.
+            # OK for inference / zero-shot; training should use copy_raw_to_local=True.
             if local_raw.exists():
                 local_raw.rmdir() if not any(local_raw.iterdir()) else shutil.rmtree(local_raw)
             local_raw.symlink_to(drive_raw)
@@ -611,18 +611,18 @@ def setup_aic2026_environment(
         pass  # will be filled by Step 4 Kaggle download
     else:
         raise FileNotFoundError(
-            f"Không tìm thấy raw dataset.\n"
-            f"  - Drive: {drive_raw} (không tồn tại hoặc rỗng)\n"
-            f"  - Local: {local_raw} (không tồn tại hoặc rỗng)\n"
-            f"Hãy upload dataset lên {drive_raw}, hoặc set use_kaggle=True nếu "
-            f"muốn download qua Kaggle."
+            f"Raw dataset not found.\n"
+            f"  - Drive: {drive_raw} (does not exist or is empty)\n"
+            f"  - Local: {local_raw} (does not exist or is empty)\n"
+            f"Please upload the dataset to {drive_raw}, or set use_kaggle=True to "
+            f"download via Kaggle."
         )
 
     # Step 3b: Restore manifests
     if local_manifests.exists() and (local_manifests.is_symlink() or any(local_manifests.iterdir())):
-        print(f"[setup] manifests đã ready: {local_manifests}")
+        print(f"[setup] manifests already ready: {local_manifests}")
     elif drive_manifests.exists() and any(drive_manifests.iterdir()):
-        # Manifests nhẹ (~100MB parquets) — symlink hoặc rsync đều OK
+        # Manifests are lightweight (~100MB parquets) — symlink or rsync both OK
         if local_manifests.exists():
             local_manifests.rmdir() if not any(local_manifests.iterdir()) else shutil.rmtree(local_manifests)
         local_manifests.symlink_to(drive_manifests)
@@ -630,18 +630,19 @@ def setup_aic2026_environment(
     elif use_kaggle:
         pass  # will be filled by Step 4 Kaggle download
     else:
-        print(f"[setup] ⚠️  Không có manifest ở {drive_manifests} hoặc {local_manifests} "
-              f"— pipeline phụ thuộc manifest sẽ lỗi. Pipeline zero-shot không cần.")
+        print(f"[setup] WARNING: No manifest at {drive_manifests} or {local_manifests} "
+              f"— pipelines depending on manifests will fail. Zero-shot pipeline does not need it.")
 
-    # Step 4: Kaggle download fallback (chỉ khi use_kaggle=True) ------------
+    # Step 4: Kaggle download fallback (only when use_kaggle=True) ------------
     if use_kaggle:
         _download_kaggle_dataset(kaggle_dataset, local_raw, force=force_redownload)
         _download_kaggle_dataset(kaggle_manifest_dataset, local_manifests, force=force_redownload)
 
-    # Step 5: resume output đã có trên Drive --------------------------------
-    # Drive FUSE đôi khi throw I/O error (Errno 5) khi mkdir subpath, đặc biệt
-    # path mới + Drive sync chưa kịp index. Retry vài lần với backoff, sau đó
-    # fall back: vẫn tạo local_output, skip Drive sync (gọi mirror_* later).
+    # Step 5: resume existing output on Drive --------------------------------
+    # Drive FUSE sometimes throws I/O error (Errno 5) on mkdir of new subpaths,
+    # especially on new paths before Drive sync has had time to index them.
+    # Retry a few times with backoff, then fall back: still create local_output,
+    # skip Drive sync (call mirror_* later).
     drive_output = drive_root / "output"
     local_output = local_root / "output"
     local_output.mkdir(parents=True, exist_ok=True)
@@ -651,9 +652,9 @@ def setup_aic2026_environment(
         print(f"[setup] resume: rsync existing chunks {drive_output} → {local_output}")
         _rsync(drive_output, local_output)
     elif not drive_output_ok:
-        print(f"[setup] ⚠️  Drive output mkdir failed sau retries — pipeline vẫn chạy "
-              f"trên local. Gọi mirror_dataset_to_drive() ở cell cuối khi Drive "
-              f"đã ổn định, hoặc retry lại setup_aic2026_environment().")
+        print(f"[setup] WARNING: Drive output mkdir failed after retries — pipeline will still run "
+              f"on local. Call mirror_dataset_to_drive() in the last cell once Drive "
+              f"is stable, or retry setup_aic2026_environment().")
 
     # Step 6: resolve concrete subdirs --------------------------------------
     def _first_existing(*candidates: Path) -> Path | None:
@@ -694,8 +695,8 @@ def setup_aic2026_environment(
         print(f"  {k}: {v}")
     if use_kaggle:
         print(
-            "[setup] Kaggle mode: gọi mirror_dataset_to_drive(PATHS) ở cell "
-            "cuối để cache raw/manifests lên Drive cho session sau."
+            "[setup] Kaggle mode: call mirror_dataset_to_drive(PATHS) in the last "
+            "cell to cache raw/manifests to Drive for future sessions."
         )
     return paths
 
@@ -705,28 +706,28 @@ def mirror_raw_as_tar_split(
     part_size: str = "4500M",
     force: bool = False,
 ) -> Path | None:
-    """Tar local raw → split thành nhiều .tar.part_* (<5GB mỗi part) trên Drive.
+    """Tar local raw -> split into multiple .tar.part_* (<5GB each part) on Drive.
 
-    Lý do tách: Drive FUSE chỉ accept upload <5GB/file. 100GB raw → ~22 parts.
-    Total time ~30-40 min cho 100GB (Drive write ~50 MB/s).
+    Reason for splitting: Drive FUSE only accepts uploads <5GB/file. 100GB raw -> ~22 parts.
+    Total time ~30-40 min for 100GB (Drive write ~50 MB/s).
 
-    Sau bước này, session mới có thể gọi `restore_raw_from_tar_split()` thay
-    cho `kagglehub.dataset_download()` — restore ~30-40 min thay vì 2h re-DL.
+    After this step, a new session can call `restore_raw_from_tar_split()` instead
+    of `kagglehub.dataset_download()` — restore ~30-40 min instead of 2h re-DL.
 
     Args:
-        paths: dict trả về từ setup_aic2026_environment().
-        part_size: kích thước mỗi part (4500M = 4.5GB, dưới 5GB FUSE limit).
-        force: nếu True, xóa parts cũ trên Drive và tar lại.
+        paths: dict returned from setup_aic2026_environment().
+        part_size: size of each part (4500M = 4.5GB, below 5GB FUSE limit).
+        force: if True, delete old parts on Drive and re-tar.
 
     Returns:
-        Path tới thư mục chứa parts trên Drive, hoặc None nếu skip.
+        Path to the directory containing parts on Drive, or None if skipped.
     """
     local_raw = Path(paths["local_root"]) / "raw"
     drive_root = Path(paths["drive_root"])
     parts_dir = drive_root / "raw_tar_parts"
 
     if not local_raw.exists() or not any(local_raw.iterdir()):
-        print("[mirror-tar] local_raw trống — skip")
+        print("[mirror-tar] local_raw is empty — skip")
         return None
 
     parts_dir.mkdir(parents=True, exist_ok=True)
@@ -735,8 +736,8 @@ def mirror_raw_as_tar_split(
 
     if marker.exists() and existing and not force:
         size_gb = sum(p.stat().st_size for p in existing) / 2**30
-        print(f"[mirror-tar] đã có {len(existing)} parts ({size_gb:.1f} GB) — skip "
-              f"(force=True để overwrite)")
+        print(f"[mirror-tar] already have {len(existing)} parts ({size_gb:.1f} GB) — skip "
+              f"(force=True to overwrite)")
         return parts_dir
 
     if force:
@@ -745,8 +746,8 @@ def mirror_raw_as_tar_split(
         if marker.exists():
             marker.unlink()
 
-    # rglob đếm size — follow_symlinks bằng cách stat() trực tiếp (tự dereference).
-    # Đây quan trọng nếu local_raw chứa symlinks tới kagglehub cache.
+    # rglob count size — follow_symlinks by stat() directly (auto-dereferences).
+    # Important if local_raw contains symlinks to kagglehub cache.
     def _real_size(path: Path) -> int:
         try:
             return path.stat().st_size  # stat() follow symlinks by default
@@ -754,12 +755,12 @@ def mirror_raw_as_tar_split(
             return 0
     raw_size_gb = sum(_real_size(f) for f in local_raw.rglob("*")) / 2**30
     print(f"[mirror-tar] tar {raw_size_gb:.1f} GB → split {part_size} parts → {parts_dir}")
-    print(f"[mirror-tar] ETA: ~{int(raw_size_gb / 50 * 60)} phút (Drive write ~50 MB/s)")
+    print(f"[mirror-tar] ETA: ~{int(raw_size_gb / 50 * 60)} min (Drive write ~50 MB/s)")
 
-    # tar -chf: -h dereference symlinks → archive nội dung thật, không phải link.
-    # Quan trọng khi local_raw là symlink farm tới kagglehub cache:
-    #   raw/train/imgs_0 → /root/.cache/kagglehub/.../train/imgs_0/
-    # Không có -h → tar archive sẽ chứa broken symlinks (rỗng khi restore).
+    # tar -chf: -h dereferences symlinks -> archives actual content, not the link.
+    # Important when local_raw is a symlink farm to kagglehub cache:
+    #   raw/train/imgs_0 -> /root/.cache/kagglehub/.../train/imgs_0/
+    # Without -h -> tar archive would contain broken symlinks (empty when restored).
     cmd = (
         f'tar -chf - -C {local_raw.parent} {local_raw.name} | '
         f'split -b {part_size} - "{parts_dir}/raw.tar.part_"'
@@ -783,16 +784,16 @@ def mirror_raw_as_tar_split(
 
 
 def restore_raw_from_tar_split(paths: dict, force: bool = False) -> bool:
-    """Untar Drive raw.tar.part_* → local SSD (~30-40 min cho 100GB).
+    """Untar Drive raw.tar.part_* -> local SSD (~30-40 min for 100GB).
 
-    Faster than kagglehub re-download (~2h cho 100GB).
+    Faster than kagglehub re-download (~2h for 100GB).
 
     Args:
-        paths: dict trả về từ setup_aic2026_environment().
-        force: nếu True, xóa local_raw cũ và untar lại.
+        paths: dict returned from setup_aic2026_environment().
+        force: if True, delete old local_raw and untar again.
 
     Returns:
-        True nếu restore thành công (data đã ở local), False nếu fail/skip.
+        True if restore succeeded (data is on local), False if failed/skipped.
     """
     local_root = Path(paths["local_root"])
     drive_root = Path(paths["drive_root"])
@@ -808,10 +809,10 @@ def restore_raw_from_tar_split(paths: dict, force: bool = False) -> bool:
         return False
 
     if local_raw.exists() and any(local_raw.iterdir()) and not force:
-        # Heuristic: nếu local_raw đã có >50GB → assume đã restore
+        # Heuristic: if local_raw already has >50GB -> assume already restored
         local_size_gb = sum(f.stat().st_size for f in local_raw.rglob("*") if f.is_file()) / 2**30
         if local_size_gb > 50:
-            print(f"[restore-tar] {local_raw} đã có {local_size_gb:.1f} GB — skip")
+            print(f"[restore-tar] {local_raw} already has {local_size_gb:.1f} GB — skip")
             return True
 
     if force and local_raw.exists():
@@ -820,7 +821,7 @@ def restore_raw_from_tar_split(paths: dict, force: bool = False) -> bool:
     local_raw.parent.mkdir(parents=True, exist_ok=True)
     total_size_gb = sum(p.stat().st_size for p in parts) / 2**30
     print(f"[restore-tar] cat {len(parts)} parts ({total_size_gb:.1f} GB) | untar → {local_root}")
-    print(f"[restore-tar] ETA: ~{int(total_size_gb / 50 * 60)} phút (Drive read ~50 MB/s)")
+    print(f"[restore-tar] ETA: ~{int(total_size_gb / 50 * 60)} min (Drive read ~50 MB/s)")
 
     # cat parts | tar -xf - (stream untar, no temp file needed)
     cat_cmd = " ".join(f'"{p}"' for p in parts)
@@ -841,18 +842,18 @@ def mirror_dataset_to_drive(
     include_manifests: bool = True,
     include_output: bool = False,
 ) -> None:
-    """Push local SSD raw/manifests lên Drive để session sau dùng cache.
+    """Push local SSD raw/manifests to Drive for future sessions to use as cache.
 
-    Gọi ở cell cuối notebook sau khi đã encode xong — tách khỏi setup()
-    để session đầu khởi động nhanh (không pay Drive write 1GB trước
-    khi bắt đầu encoding).
+    Call in the last notebook cell after encoding is complete — separated from setup()
+    so the first session starts quickly (no Drive write overhead before
+    encoding begins).
 
     Args:
-        paths: dict trả về từ `setup_aic2026_environment()`.
-        include_raw: copy `raw/` (annotation + train webp + test set) lên Drive.
-        include_manifests: copy `manifests/` (parquet files) lên Drive.
-        include_output: copy `output/` lên Drive (thường KHÔNG cần — chunks
-            đã được sync per-chunk qua `sync_chunk_to_drive`).
+        paths: dict returned from `setup_aic2026_environment()`.
+        include_raw: copy `raw/` (annotation + train webp + test set) to Drive.
+        include_manifests: copy `manifests/` (parquet files) to Drive.
+        include_output: copy `output/` to Drive (usually NOT needed — chunks
+            are already synced per-chunk via `sync_chunk_to_drive`).
     """
     local_root = Path(paths["local_root"])
     drive_root = Path(paths["drive_root"])
@@ -871,13 +872,13 @@ def mirror_dataset_to_drive(
 
     for src, dst, label in targets:
         if not src.exists() or not any(src.iterdir()):
-            print(f"[mirror] {label}: local trống — skip")
+            print(f"[mirror] {label}: local is empty — skip")
             continue
         print(f"[mirror] rsync local → Drive ({label})")
         _rsync(src, dst)
         print(f"[mirror] {label}: synced → {dst}")
 
-    print("[mirror] Done. Session sau sẽ tự restore từ Drive trong setup().")
+    print("[mirror] Done. Future sessions will auto-restore from Drive in setup().")
 
 
 # ---------------------------------------------------------------------------
@@ -886,15 +887,15 @@ def mirror_dataset_to_drive(
 
 
 def select_a100_device(prefer_a100: bool = True, verbose: bool = True):
-    """Chọn GPU mạnh nhất (A100 nếu có) và tune CUDA backends.
+    """Select the most powerful GPU (A100 if available) and tune CUDA backends.
 
-    Returns torch.device. Warn nếu không phải A100/H100.
+    Returns torch.device. Warns if not A100/H100.
     """
-    import torch  # local import để module không cần torch khi import
+    import torch  # local import so module does not require torch at import time
 
     if not torch.cuda.is_available():
         if verbose:
-            print("[device] CUDA không khả dụng — dùng CPU.")
+            print("[device] CUDA not available — using CPU.")
         return torch.device("cpu")
 
     candidates = []
@@ -931,8 +932,8 @@ def select_a100_device(prefer_a100: bool = True, verbose: bool = True):
         print(f"[device] Selected {device} ({name})")
         if "A100" not in name and "H100" not in name:
             print(
-                "[device] ⚠️ Không phải A100/H100 — batch_size mặc định "
-                "trong notebook có thể OOM. Giảm IMAGE_BATCH_SIZE nếu cần."
+                "[device] WARNING: Not A100/H100 — the default batch_size "
+                "in the notebook may OOM. Reduce IMAGE_BATCH_SIZE if needed."
             )
 
     return device
@@ -1000,23 +1001,23 @@ def sync_chunk_to_drive(
     drive_output_root: str | os.PathLike,
     background: bool = True,
 ) -> threading.Thread | None:
-    """Copy 1 chunk từ local SSD → Drive, giữ nguyên relative path.
+    """Copy 1 chunk from local SSD -> Drive, preserving the relative path.
 
-    Khi `background=True`, copy chạy trong thread daemon — không block training.
-    Trả về thread handle (hoặc None nếu sync sync).
+    When `background=True`, the copy runs in a daemon thread — does not block training.
+    Returns the thread handle (or None if sync is synchronous).
     """
     local_path = Path(local_path)
     local_root = Path(local_root)
     drive_output_root = Path(drive_output_root)
     rel = local_path.relative_to(local_root)
     dst = drive_output_root.parent / rel  # local_root/output/... → drive_root/output/...
-    # local_root convention: local_root/output/<rel>. drive_output_root đã trỏ
-    # tới drive_root/output. Tính lại đơn giản hơn:
+    # local_root convention: local_root/output/<rel>. drive_output_root already points
+    # to drive_root/output. Compute more simply:
     try:
         rel = local_path.relative_to(local_root / "output")
         dst = drive_output_root / rel
     except ValueError:
-        # local_path không nằm trong local_root/output — fallback dùng filename
+        # local_path is not under local_root/output — fallback to filename only
         dst = drive_output_root / local_path.name
 
     def _job():
@@ -1027,7 +1028,7 @@ def sync_chunk_to_drive(
         t = threading.Thread(target=_job, daemon=True)
         t.start()
         _SYNC_THREADS.append(t)
-        # Dọn các thread đã chết khỏi list (tránh leak)
+        # Remove dead threads from the list (avoid leak)
         _SYNC_THREADS[:] = [x for x in _SYNC_THREADS if x.is_alive()]
         return t
     _job()
@@ -1035,18 +1036,18 @@ def sync_chunk_to_drive(
 
 
 def wait_for_pending_syncs(timeout_per_thread: float = 600.0) -> None:
-    """Block tới khi tất cả background sync hoàn tất.
+    """Block until all background syncs have completed.
 
-    Gọi cuối notebook trước khi kết thúc session.
+    Call at the end of the notebook before the session terminates.
     """
     for t in list(_SYNC_THREADS):
         if t.is_alive():
             t.join(timeout=timeout_per_thread)
     _SYNC_THREADS[:] = [x for x in _SYNC_THREADS if x.is_alive()]
     if _SYNC_THREADS:
-        print(f"[sync] ⚠️ {len(_SYNC_THREADS)} thread vẫn chạy sau timeout.")
+        print(f"[sync] WARNING: {len(_SYNC_THREADS)} thread(s) still running after timeout.")
     else:
-        print("[sync] Tất cả chunks đã sync xong lên Drive.")
+        print("[sync] All chunks have been synced to Drive.")
 
 
 # ---------------------------------------------------------------------------
@@ -1058,9 +1059,9 @@ def find_existing_chunks(
     *output_dirs: str | os.PathLike,
     pattern: str = "chunk_*.npz",
 ) -> set[str]:
-    """Tập hợp basename của chunks đã có trên cả local lẫn Drive.
+    """Collect basenames of chunks already present on both local and Drive.
 
-    Truyền nhiều dir để union (ví dụ local + Drive cùng subpath).
+    Pass multiple dirs to union them (e.g. local + Drive with same subpath).
     """
     found: set[str] = set()
     for d in output_dirs:
@@ -1077,10 +1078,10 @@ def chunk_done(
     drive_output_root: Path | None,
     local_root: Path | None,
 ) -> bool:
-    """True nếu chunk đã tồn tại ở local hoặc đã sync xong lên Drive.
+    """True if the chunk already exists locally or has been synced to Drive.
 
-    Kiểm tra Drive đối chiếu để không tốn compute re-encode khi local SSD
-    bị mất (session reset) trong khi Drive đã có.
+    Checks Drive as a fallback to avoid wasting compute re-encoding when
+    local SSD is lost (session reset) but Drive already has the chunk.
     """
     if chunk_path.exists():
         return True
@@ -1089,7 +1090,7 @@ def chunk_done(
             rel = chunk_path.relative_to(local_root / "output")
             drive_path = drive_output_root / rel
             if drive_path.exists():
-                # Khôi phục về local để dùng tiếp
+                # Restore to local for continued use
                 drive_path.parent.mkdir(parents=True, exist_ok=True)
                 _copy_with_retry(drive_path, chunk_path)
                 return True

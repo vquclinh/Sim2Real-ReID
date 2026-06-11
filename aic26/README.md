@@ -101,3 +101,5 @@ These patterns are already covered by `.gitignore` at the repo root.
 | `docs/audits/FORK_REPO_AUDIT.md` | Audit of this fork after initial setup |
 | `docs/audits/AIC26_COPY_VERIFICATION.md` | Verification report after copying files from teammate repo |
 | `docs/audits/AIC26_FIX_REPORT.md` | Report of fixes applied after copy verification |
+| `docs/audits/AIC26_VI_TO_EN_TRANSLATION_REPORT.md` | Vietnamese→English translation report (all 16 files) |
+| `docs/audits/AIC26_NOTEBOOK_FORMAT_FIX_REPORT.md` | Notebook character-split format fix + final translation pass |
