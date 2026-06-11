@@ -1,0 +1,15 @@
+{
+  "queries": 1978,
+  "found_any": 1978,
+  "mAP": 0.8828873675590718,
+  "mean_rank": 1.7512639029322548,
+  "median_rank": 1.0,
+  "R@1": 0.7932254802831142,
+  "R@5": 0.9838220424671386,
+  "R@10": 0.9944388270980788,
+  "run_id": "local_001_pe_g14_attr_zero_shot",
+  "model": "PE-Core-G14-448",
+  "dataset": "PAB original attr test",
+  "n_queries": 1978,
+  "n_gallery": 1978
+}
