@@ -1,0 +1,13 @@
+{
+  "pythonVersion": "3.11",
+  "typeCheckingMode": "basic",
+  "reportMissingImports": "warning",
+  "reportMissingModuleSource": "none",
+  "exclude": [
+    "lhp_2/",
+    "uit/",
+    "blip/",
+    "sims_score/",
+    "predictions/"
+  ]
+}
