@@ -27,10 +27,26 @@ print("GPU:", gpu_name)
 print("GPU memory GB:", gpu_mem_gb)
 print("System RAM GB:", ram_gb)
 
-assert ("A100" in gpu_name) or gpu_mem_gb >= 35, "PE-Core-G14-448 needs A100-class GPU. Do not run on T4."
-assert ram_gb >= 35, "High-RAM runtime is recommended."
+if ("A100" in gpu_name) or gpu_mem_gb >= 35:
+    print("PASS: A100/high-VRAM runtime detected.")
+    print("This should be fast and stable for PE-Core-G14-448.")
+elif ("L4" in gpu_name) or gpu_mem_gb >= 22:
+    print("PASS: L4/24GB-class runtime detected.")
+    print("This should work for PE-Core-G14-448, but it may be slower than A100.")
+elif ("T4" in gpu_name) or gpu_mem_gb < 20:
+    print("WARNING: T4/low-VRAM runtime detected.")
+    print("PE-Core-G14-448 may be slow or may run out of memory.")
+    print("Continue only if you accept the risk.")
+else:
+    print("WARNING: Unknown GPU runtime.")
+    print("The notebook will continue, but monitor for OOM errors.")
 
-print("PASS: runtime is suitable.")
+if ram_gb < 35:
+    print("WARNING: System RAM is below 35GB. High-RAM runtime is recommended.")
+else:
+    print("PASS: system RAM is enough.")
+
+print("PASS: runtime preflight completed.")
 ```
 
 ## Cell 2
@@ -132,6 +148,7 @@ if str(REPO_DIR) not in sys.path:
     sys.path.insert(0, str(REPO_DIR))
 
 print("Repo path:", REPO_DIR)
+print("PASS: repo utilities ready.")
 
 ```
 
@@ -176,7 +193,7 @@ for row in rows:
     query_captions.append(caption)
     positive_images.append(row["image"])
 
-# Gallery: sorted unique image paths (relative, e.g. "test/0.jpg")
+# Gallery: sorted unique image paths, e.g. "test/0.jpg"
 gallery_ids = sorted(set(row["image"] for row in rows))
 
 # Absolute paths for each gallery image
@@ -279,14 +296,24 @@ QUERY_CACHE   = CACHE_DIR / "query_emb.npz"
 # gallery_ids and query_captions are defined in Cell 4
 gallery_abs_paths = [RAW_DIR / rel for rel in gallery_ids]
 
-IMG_BATCH       = 96 if total_gb < 60 else 256
+# Batch size only affects speed and VRAM usage, not retrieval accuracy.
+# L4 worked before, so keep L4 around 96. A100 can use a larger batch.
+if total_gb >= 60:
+    IMG_BATCH = 256
+elif total_gb >= 22:
+    IMG_BATCH = 96
+else:
+    IMG_BATCH = 32
+
 NUM_WORKERS     = 4
 PREFETCH_FACTOR = 2
 TEXT_BATCH      = 256
 
 print("Gallery images:", len(gallery_ids))
 print("Query captions:", len(query_captions))
+print("GPU memory GB:", total_gb)
 print("IMG_BATCH:", IMG_BATCH)
+print("TEXT_BATCH:", TEXT_BATCH)
 
 
 class GalleryDataset(Dataset):
@@ -331,8 +358,10 @@ def encode_gallery():
         with torch.autocast(device_type="cuda", dtype=AUTOCAST_DTYPE):
             feats = pe_model.encode_image(tensors)
             feats = F.normalize(feats.float(), dim=-1).half().cpu().numpy()
+
         chunks.append(feats)
         ok_flags[idxs.numpy()] = oks.numpy().astype(bool)
+
         seen += tensors.size(0)
         if seen % (IMG_BATCH * 10) == 0 or seen == len(gallery_abs_paths):
             elapsed = time.time() - t0
@@ -363,14 +392,17 @@ def encode_queries():
         end   = min(start + TEXT_BATCH, len(query_captions))
         texts = query_captions[start:end]
         tokens = pe_tokenizer(texts).to(device)
+
         with torch.autocast(device_type="cuda", dtype=AUTOCAST_DTYPE):
             feats = pe_model.encode_text(tokens)
             feats = F.normalize(feats.float(), dim=-1).half().cpu().numpy()
+
         chunks.append(feats)
         print(f"encoded queries {end}/{len(query_captions)}")
 
     query_emb = np.concatenate(chunks, axis=0).astype(np.float16)
     np.savez_compressed(QUERY_CACHE, ids=np.array(query_ids), emb=query_emb)
+
     print("Saved query cache:", QUERY_CACHE)
     print(f"Query encode done in {time.time() - t0:.1f}s")
     return query_emb
@@ -409,18 +441,18 @@ DRIVE_RUN = Path("/content/drive/MyDrive/aic2026_data/pab_original/runs") / RUN_
 LOCAL_RUN.mkdir(parents=True, exist_ok=True)
 DRIVE_RUN.mkdir(parents=True, exist_ok=True)
 
-# Compute full similarity matrix and ranked indices
-# gallery_emb_np, query_emb_np from Cell 6; device from Cell 5
+# Compute full similarity matrix and ranked indices.
+# gallery_emb_np, query_emb_np from Cell 6; device from Cell 5.
 G_t = torch.from_numpy(gallery_emb_np).to(device, dtype=torch.float32)
 Q_t = torch.from_numpy(query_emb_np).to(device, dtype=torch.float32)
 
 print("Computing similarity matrix...")
 with torch.inference_mode():
-    sims_np = (Q_t @ G_t.T).cpu().numpy()  # (n_queries, n_gallery)
+    sims_np = (Q_t @ G_t.T).cpu().numpy()  # shape: (n_queries, n_gallery)
 
 ranked_indices = np.argsort(-sims_np, axis=1)  # full ranking per query
 
-# gallery_ids, query_ids, query_captions, positive_images from Cell 4
+# gallery_ids, query_ids, query_captions, positive_images from Cell 4.
 positive_ranks = find_positive_ranks(gallery_ids, ranked_indices, positive_images)
 
 metrics = compute_single_positive_metrics(positive_ranks)
@@ -433,16 +465,26 @@ metrics.update({
 })
 
 top10_records = build_topk_records(
-    query_ids, query_captions, positive_images,
-    gallery_ids, ranked_indices, positive_ranks, topk=10,
+    query_ids=query_ids,
+    query_captions=query_captions,
+    positive_images=positive_images,
+    gallery_ids=gallery_ids,
+    ranked_indices=ranked_indices,
+    positive_ranks=positive_ranks,
+    topk=10,
 )
+
 positive_rank_records = [
     {"query_id": qid, "positive_image": pos, "positive_rank": rank}
     for qid, pos, rank in zip(query_ids, positive_images, positive_ranks)
 ]
 
-now = datetime.datetime.now().isoformat(timespec='seconds')
-extra = {"Model": "PE-Core-G14-448", "Dataset": "PAB original attr test", "Date": now}
+now = datetime.datetime.now().isoformat(timespec="seconds")
+extra = {
+    "Model": "PE-Core-G14-448",
+    "Dataset": "PAB original attr test",
+    "Date": now,
+}
 
 run_info_lines = [
     "# " + RUN_ID,
@@ -469,8 +511,8 @@ run_info_lines = [
     "Median rank: " + f"{metrics['median_rank']:.0f}",
     "Mean rank: " + f"{metrics['mean_rank']:.1f}",
 ]
-NL = chr(10)
-run_info_md = NL.join(run_info_lines) + NL
+
+run_info_md = "\n".join(run_info_lines) + "\n"
 
 for run_dir in [LOCAL_RUN, DRIVE_RUN]:
     write_json(run_dir / "metrics.json", metrics)
