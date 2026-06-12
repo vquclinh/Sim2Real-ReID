@@ -10,6 +10,13 @@ This tool bridges the two WITHOUT modifying author code and WITHOUT copying data
 it builds a symlink farm under --out-root (local disk) pointing back into the
 read-only Drive dataset, then verifies that the author-side relative paths resolve.
 
+The competition images are stored as `.webp` while the annotations reference
+`.jpg`. When that mismatch is detected (--rewrite-image-ext auto, the default),
+the annotation files are not symlinked but CONVERTED: each `imgs_i.json` is
+streamed line by line into a local `pair_i.json` with `record["image"]`
+rewritten `.jpg` -> `.webp` (all other fields preserved exactly, Drive source
+untouched, no per-image symlinks).
+
 Read-only with respect to the Drive dataset. Creates only symlinks and tiny
 reports under --out-root / the report directory. Never deletes anything outside
 --out-root. Standard library only (no torch / PIL / transformers / GPU).
@@ -141,25 +148,141 @@ def ensure_symlink(link: Path, target: Path, overwrite: bool) -> str:
     return "created"
 
 
-def build_layout(data_root: Path, out_root: Path, mapping: dict, overwrite: bool):
-    ann_src = data_root / "raw" / "annotation" / "train"
-    ann_out = out_root / "annotation" / "train"
+def build_image_links(out_root: Path, mapping: dict, overwrite: bool):
     train_out = out_root / "train"
-    ann_out.mkdir(parents=True, exist_ok=True)
     train_out.mkdir(parents=True, exist_ok=True)
-
-    ann_actions = {"kept": 0, "created": 0, "replaced": 0}
-    for i in EXPECTED_INDICES:
-        action = ensure_symlink(ann_out / f"pair_{i}.json",
-                                (ann_src / f"imgs_{i}.json").resolve(), overwrite)
-        ann_actions[action] += 1
-
     img_actions = {"kept": 0, "created": 0, "replaced": 0}
     for i in EXPECTED_INDICES:
         name = f"imgs_{i}"
         action = ensure_symlink(train_out / name, mapping[name].resolve(), overwrite)
         img_actions[action] += 1
-    return ann_actions, img_actions
+    return img_actions
+
+
+def build_annotation_links(data_root: Path, out_root: Path, overwrite: bool):
+    """Symlink mode: pair_i.json -> imgs_i.json on Drive (no conversion)."""
+    ann_src = data_root / "raw" / "annotation" / "train"
+    ann_out = out_root / "annotation" / "train"
+    ann_out.mkdir(parents=True, exist_ok=True)
+    ann_actions = {"kept": 0, "created": 0, "replaced": 0}
+    for i in EXPECTED_INDICES:
+        action = ensure_symlink(ann_out / f"pair_{i}.json",
+                                (ann_src / f"imgs_{i}.json").resolve(), overwrite)
+        ann_actions[action] += 1
+    return ann_actions
+
+
+# ---------------------------------------------------------------- extension rewrite
+
+def detect_rewrite_ext(data_root: Path, out_root: Path, max_sample: int,
+                       files_to_probe: int = 5):
+    """Auto mode: probe sampled records against the prepared image symlinks.
+
+    Returns ('.webp', detail) when sampled `.jpg` paths are missing but the same
+    stem with `.webp` exists; otherwise ('none', detail).
+    """
+    ann_src = data_root / "raw" / "annotation" / "train"
+    probed = jpg_hits = webp_hits = 0
+    for i in EXPECTED_INDICES[:files_to_probe]:
+        src = ann_src / f"imgs_{i}.json"
+        try:
+            with open(src, "r", encoding="utf-8", errors="replace") as f:
+                for line in itertools.islice(
+                        (ln for ln in f if ln.strip()), max(max_sample, 3)):
+                    try:
+                        rec = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    image = rec.get("image")
+                    if not isinstance(image, str):
+                        continue
+                    probed += 1
+                    candidate = out_root / image.lstrip("./")
+                    if candidate.is_file():
+                        jpg_hits += 1
+                    elif image.lower().endswith(".jpg") and \
+                            candidate.with_suffix(".webp").is_file():
+                        webp_hits += 1
+        except OSError:
+            continue
+    detail = {"probed": probed, "as_annotated": jpg_hits, "webp_stem": webp_hits}
+    if webp_hits and not jpg_hits:
+        return ".webp", detail
+    return "none", detail
+
+
+def convert_annotation_file(src: Path, dst: Path, overwrite: bool):
+    """Stream src JSONL to a local dst, rewriting image '.jpg' -> '.webp'.
+
+    Returns (action, records_written, image_path_rewrites, examples).
+    Atomic: writes to a .tmp sibling then os.replace(). Never touches src.
+    """
+    if dst.is_symlink():
+        if not overwrite:
+            raise AdapterError(
+                f"{dst} is a symlink (from a previous symlink-mode run) but "
+                "converted-annotation mode needs a regular file. "
+                "Re-run with --overwrite to replace it.")
+        dst.unlink()
+        action = "replaced"
+    elif dst.exists():
+        if dst.is_dir():
+            raise AdapterError(
+                f"{dst} exists and is a real directory (not a file). "
+                "Refusing to remove a real directory — clean it up manually.")
+        if not overwrite:
+            # Assume a previous converted run produced it; --overwrite regenerates.
+            return "kept", 0, 0, []
+        action = "replaced"
+    else:
+        action = "created"
+
+    tmp = dst.with_name(dst.name + ".tmp")
+    records = rewrites = 0
+    examples = []
+    with open(src, "r", encoding="utf-8", errors="replace") as fin, \
+            open(tmp, "w", encoding="utf-8") as fout:
+        for line in fin:
+            stripped = line.strip()
+            if not stripped:
+                continue
+            try:
+                rec = json.loads(stripped)
+            except json.JSONDecodeError:
+                fout.write(stripped + "\n")  # pass through unparseable lines as-is
+                records += 1
+                continue
+            image = rec.get("image")
+            if isinstance(image, str) and image.lower().endswith(".jpg"):
+                new_image = image[:-4] + ".webp"
+                rec["image"] = new_image
+                rewrites += 1
+                if len(examples) < 3:
+                    examples.append({"before": image, "after": new_image})
+            fout.write(json.dumps(rec, ensure_ascii=False) + "\n")
+            records += 1
+    os.replace(tmp, dst)
+    return action, records, rewrites, examples
+
+
+def build_converted_annotations(data_root: Path, out_root: Path, overwrite: bool):
+    ann_src = data_root / "raw" / "annotation" / "train"
+    ann_out = out_root / "annotation" / "train"
+    ann_out.mkdir(parents=True, exist_ok=True)
+    actions = {"kept": 0, "created": 0, "replaced": 0}
+    total_records = total_rewrites = 0
+    examples = []
+    for i in EXPECTED_INDICES:
+        action, n_rec, n_rw, ex = convert_annotation_file(
+            ann_src / f"imgs_{i}.json", ann_out / f"pair_{i}.json", overwrite)
+        actions[action] += 1
+        total_records += n_rec
+        total_rewrites += n_rw
+        if len(examples) < 3:
+            examples.extend(ex[:3 - len(examples)])
+        if i % 15 == 0 or i == EXPECTED_INDICES[-1]:
+            print(f"  pair_{i}.json: {action} ({n_rec} records)", flush=True)
+    return actions, total_records, total_rewrites, examples
 
 
 # ---------------------------------------------------------------- verification
@@ -230,12 +353,17 @@ def write_markdown(path: Path, ctx):
              "(symlink adapter; Drive dataset untouched)  ")
     L.append(f"> Overall status: **{ctx['status']}**\n")
 
+    mode = ctx.get("annotation_mode", "symlink")
     L.append("## Executive Summary\n")
     L.append(f"- Overall: **{ctx['status']}**.")
-    L.append(f"- Annotation symlinks `pair_{{0..74}}.json`: "
-             f"{ctx['ann_total']}/75 in place "
+    L.append(f"- Annotation files `pair_{{0..74}}.json`: "
+             f"{ctx['ann_total']}/75 in place — mode **{mode}** "
              f"(created {ctx['ann_actions']['created']}, kept {ctx['ann_actions']['kept']}, "
              f"replaced {ctx['ann_actions']['replaced']}).")
+    L.append(f"- Image extension rewrite mode: `{ctx.get('rewrite_image_ext', 'none')}`"
+             + (f" — {ctx.get('annotation_records_written', 0)} records written, "
+                f"{ctx.get('image_path_rewrites', 0)} image paths rewritten "
+                f"`.jpg` -> `.webp`." if mode == "converted" else "."))
     L.append(f"- Image directory symlinks `train/imgs_{{0..74}}`: "
              f"{ctx['img_total']}/75 in place "
              f"(created {ctx['img_actions']['created']}, kept {ctx['img_actions']['kept']}, "
@@ -255,17 +383,43 @@ def write_markdown(path: Path, ctx):
     L.append(f"- Parts found: {', '.join(inp['parts_found']) or 'none'}\n")
 
     L.append("## Output Prepared Root\n")
+    ann_arrow = ("local converted copy of raw/annotation/train/imgs_{i}.json"
+                 if mode == "converted" else
+                 "-> raw/annotation/train/imgs_{i}.json")
     L.append(f"```\n{ctx['out_root']}\n├── annotation/train/pair_{{0..74}}.json  "
-             f"-> raw/annotation/train/imgs_{{i}}.json\n└── train/imgs_{{0..74}}           "
+             f"{ann_arrow}\n└── train/imgs_{{0..74}}           "
              f"     -> raw/Part K/imgs_N[/imgs_N]\n```\n")
 
     L.append("## Annotation Symlinks\n")
+    if mode == "converted":
+        L.append("- Mode: **converted** — local JSONL files written under the "
+                 "prepared root (Drive source annotations untouched; no per-image "
+                 "symlinks created).")
+        L.append(f"- Image extension rewrite: `{ctx.get('rewrite_image_ext')}` — "
+                 f"{ctx.get('annotation_records_written', 0)} records written, "
+                 f"{ctx.get('image_path_rewrites', 0)} image paths rewritten.")
+    else:
+        L.append("- Mode: **symlink** — `pair_i.json` symlinks to the Drive source "
+                 "`imgs_i.json` (no conversion needed).")
+    if ctx.get("detect_detail") is not None:
+        d = ctx["detect_detail"]
+        L.append(f"- Auto-detection probe: {d['probed']} sampled records — "
+                 f"{d['as_annotated']} resolved as annotated, "
+                 f"{d['webp_stem']} resolved only as `.webp` stem.")
+    L.append("")
     L.append("| Action | Count |")
     L.append("|---|---:|")
     for k in ("created", "kept", "replaced"):
         L.append(f"| {k} | {ctx['ann_actions'][k]} |")
     L.append(f"| **total** | **{ctx['ann_total']}** |")
     L.append("")
+    if ctx.get("rewrite_examples"):
+        L.append("Sample image-path rewrites (before -> after):\n")
+        L.append("```")
+        for ex in ctx["rewrite_examples"]:
+            L.append(f"{ex['before']} -> {ex['after']}")
+        L.append("```")
+        L.append("")
 
     L.append("## Image Directory Mapping\n")
     L.append("Mapping was discovered dynamically from `Part 1..10` children "
@@ -365,6 +519,10 @@ def write_summary(path: Path, ctx):
         "annotation_links_created": ctx["ann_total"],
         "image_links_created": ctx["img_total"],
         "image_dirs_mapped": len(ctx["mapping"]),
+        "annotation_mode": ctx.get("annotation_mode", "symlink"),
+        "rewrite_image_ext": ctx.get("rewrite_image_ext", "none"),
+        "annotation_records_written": ctx.get("annotation_records_written", 0),
+        "image_path_rewrites": ctx.get("image_path_rewrites", 0),
         "sampled_paths": v["sampled"],
         "sampled_paths_resolved": v["resolved"],
         "unresolved_examples": v["unresolved_examples"],
@@ -396,6 +554,14 @@ def main():
     parser.add_argument("--overwrite", action="store_true",
                         help="Recreate existing symlinks/files inside --out-root that "
                              "point to wrong targets")
+    parser.add_argument("--rewrite-image-ext", choices=["auto", "none", ".webp"],
+                        default="auto",
+                        help="Annotation image-extension handling: 'none' symlinks "
+                             "annotations as-is; '.webp' writes converted local "
+                             "pair_*.json with image paths rewritten .jpg -> .webp; "
+                             "'auto' (default) probes sampled records and picks "
+                             "'.webp' when annotated .jpg files are missing but the "
+                             "same stem exists as .webp")
     parser.add_argument("--report-dir", default=None,
                         help="Where to write the report and JSON summary "
                              "(default: aic26/docs/audits next to this script)")
@@ -462,17 +628,48 @@ def main():
         print("OVERALL: FAIL")
         return 1
 
-    print("Building prepared layout (symlinks only) ...")
+    print("Building image directory symlinks ...")
     try:
-        ann_actions, img_actions = build_layout(data_root, out_root, mapping,
-                                                args.overwrite)
+        img_actions = build_image_links(out_root, mapping, args.overwrite)
+    except AdapterError as exc:
+        print(f"ERROR: {exc}")
+        return 1
+    print(f"  image dir links : {img_actions}")
+
+    rewrite_mode = args.rewrite_image_ext
+    detect_detail = None
+    if rewrite_mode == "auto":
+        rewrite_mode, detect_detail = detect_rewrite_ext(
+            data_root, out_root, args.max_sample_per_file)
+        print(f"  auto-detected rewrite mode: {rewrite_mode} ({detect_detail})")
+
+    annotation_mode = "converted" if rewrite_mode == ".webp" else "symlink"
+    print(f"Building annotation files (mode: {annotation_mode}) ...")
+    try:
+        if annotation_mode == "converted":
+            ann_actions, records_written, path_rewrites, rewrite_examples = \
+                build_converted_annotations(data_root, out_root, args.overwrite)
+        else:
+            ann_actions = build_annotation_links(data_root, out_root, args.overwrite)
+            records_written = path_rewrites = 0
+            rewrite_examples = []
     except AdapterError as exc:
         print(f"ERROR: {exc}")
         return 1
     ann_total = sum(ann_actions.values())
     img_total = sum(img_actions.values())
-    print(f"  annotation links: {ann_actions}")
-    print(f"  image dir links : {img_actions}")
+    print(f"  annotation files: {ann_actions}")
+    if annotation_mode == "converted":
+        print(f"  records written : {records_written}; "
+              f"image paths rewritten: {path_rewrites}")
+        if ann_actions["kept"]:
+            warnings_note = (f"{ann_actions['kept']} existing converted pair_*.json "
+                             "kept without content re-check — use --overwrite to "
+                             "force regeneration.")
+        else:
+            warnings_note = None
+    else:
+        warnings_note = None
 
     print("Verifying author-side image paths ...")
     verify = verify_author_paths(out_root, args.max_sample_per_file)
@@ -498,6 +695,8 @@ def main():
                         "is still missing — UIT/CMP training eval step blocked until "
                         "it is sourced or the config is adjusted. (BEiT-3/LHP is "
                         "unaffected.) This script does not create validation data.")
+    if warnings_note:
+        warnings.append(warnings_note)
 
     if blocking:
         status = "FAIL"
@@ -513,6 +712,12 @@ def main():
         "map_duplicates": duplicates, "map_skipped": skipped,
         "ann_actions": ann_actions, "img_actions": img_actions,
         "ann_total": ann_total, "img_total": img_total,
+        "annotation_mode": annotation_mode,
+        "rewrite_image_ext": rewrite_mode if rewrite_mode == ".webp" else "none",
+        "annotation_records_written": records_written,
+        "image_path_rewrites": path_rewrites,
+        "rewrite_examples": rewrite_examples,
+        "detect_detail": detect_detail,
         "verify": verify, "uit_check": uit_check,
         "beit3_ready": beit3_ready, "uit_ready": uit_ready,
         "status": status, "blocking": blocking, "warnings": warnings,
